@@ -1,0 +1,78 @@
+name: efk-python-demo
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION}
+    container_name: efk-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false          # demo only, see docs/configuration.md
+      - ES_JAVA_OPTS=-Xms${ES_HEAP} -Xmx${ES_HEAP}
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+    ports:
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -vq '\"status\":\"red\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${ELASTIC_VERSION}
+    container_name: efk-kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "127.0.0.1:5601:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  fluentd:
+    build:
+      context: ./fluentd
+      args:
+        FLUENTD_IMAGE: ${FLUENTD_IMAGE}
+    container_name: efk-fluentd
+    environment:
+      - ES_HOST=elasticsearch
+      - ES_PORT=9200
+      - ES_INDEX_PREFIX=${ES_INDEX_PREFIX}
+    volumes:
+      - ./fluentd/conf/fluent.conf:/fluentd/etc/fluent.conf:ro
+    ports:
+      # The Docker daemon (on the host) connects here for the fluentd log driver
+      - "127.0.0.1:24224:24224"
+      - "127.0.0.1:24224:24224/udp"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  python-app:
+    build: ./app
+    container_name: efk-python-app
+    environment:
+      - SERVICE_NAME=${SERVICE_NAME}
+      - APP_ENV=${APP_ENV}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - LOG_INTERVAL=${LOG_INTERVAL}
+    depends_on:
+      - fluentd
+    logging:
+      driver: fluentd
+      options:
+        fluentd-address: 127.0.0.1:24224
+        fluentd-async: "true"            # don't block/fail container start if fluentd is down
+        fluentd-retry-wait: 1s
+        fluentd-max-retries: "30"
+        tag: docker.{{.Name}}
+    restart: unless-stopped
+
+volumes:
+  esdata:
